@@ -1,5 +1,9 @@
 # Interlock
 
+[![Build Status](https://github.com/demdxx/interlock/workflows/run%20tests/badge.svg)](https://github.com/demdxx/interlock/actions?workflow=run%20tests)
+[![Coverage Status](https://coveralls.io/repos/github/demdxx/interlock/badge.svg?branch=master)](https://coveralls.io/github/demdxx/interlock?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/demdxx/interlock)](https://goreportcard.com/report/github.com/demdxx/interlock) 
+
 Package implements inter service lock based on different external storages.
 
 ## Example
