@@ -11,7 +11,10 @@ import (
 	"github.com/go-redis/redis"
 )
 
-var errLockHasFailed = errors.New(`redis lock has failed`)
+var (
+	errLockHasFailed    = errors.New(`redis lock has failed`)
+	errLockDoesNotExist = errors.New(`redis lock for provided key does not exist`)
+)
 
 // Lock provides redis key locker
 type Lock struct {
@@ -68,4 +71,17 @@ func (mr *Lock) IsLocked(key interface{}) bool {
 // Unlock message as processing
 func (mr *Lock) Unlock(key interface{}) error {
 	return mr.client.Del(hash(key)).Err()
+}
+
+// Expire TTL of existing lock
+func (mr *Lock) Expire(key interface{}, lifetime ...time.Duration) error {
+	lt := mr.lifetime
+	if len(lifetime) == 1 {
+		lt = lifetime[0]
+	}
+	res, err := mr.client.Expire(hash(key), lt).Result()
+	if err == nil && !res {
+		err = errLockDoesNotExist
+	}
+	return err
 }

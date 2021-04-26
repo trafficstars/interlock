@@ -29,6 +29,8 @@ func TestRedisLock(t *testing.T) {
 	assert.True(t, rlock.IsLocked(msg))
 	assert.NoError(t, rlock.Unlock(msg))
 	assert.NoError(t, rlock.TryLock(msg))
+	assert.NoError(t, rlock.Expire(msg, time.Second))
+	assert.Error(t, rlock.Expire(`void`, time.Second))
 }
 
 func TestRedisLockByURL(t *testing.T) {
