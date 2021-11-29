@@ -36,6 +36,8 @@ func TestRedisLock(t *testing.T) {
 func TestRedisLockByURL(t *testing.T) {
 	_, err := NewByURL(`redis://:password@localhost:6379/1`, time.Minute)
 	assert.NoError(t, err)
+	_, err = NewByURL(`redis://:password@1.2.3.4:6379,localhost:6379/1`, time.Minute)
+	assert.NoError(t, err)
 	_, err = NewByURL(`x#:///%%@`, time.Minute)
 	assert.Error(t, err)
 }
