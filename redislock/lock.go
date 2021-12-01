@@ -55,7 +55,7 @@ func NewByURL(connectURL string, defaultLifetime time.Duration) (*Lock, error) {
 			MaxRetries:   gocast.ToInt(connectURLObj.Query().Get(`max_retries`)),
 			PoolSize:     gocast.ToInt(connectURLObj.Query().Get(`pool`)),
 			MinIdleConns: gocast.ToInt(connectURLObj.Query().Get(`idle_cons`)),
-		}), defaultLifetime), err
+		}), defaultLifetime), nil
 	}
 	return New(redis.NewClient(&redis.Options{
 		DB:           gocast.ToInt(strings.Trim(connectURLObj.Path, `/`)),
