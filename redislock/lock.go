@@ -3,8 +3,8 @@ package redislock
 
 import (
 	"errors"
-	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,10 +17,13 @@ var (
 	errLockDoesNotExist = errors.New(`redis lock for provided key does not exist`)
 )
 
+const maxSlotsCount = 16384
+
 // Lock provides redis key locker
 type Lock struct {
 	lifetime time.Duration
 	client   redis.Cmdable
+	Cluster  *redis.ClusterClient
 }
 
 // New returns redis Lock for redis client
@@ -43,19 +46,52 @@ func NewByURL(connectURL string, defaultLifetime time.Duration) (*Lock, error) {
 	}
 	hosts := strings.Split(connectURLObj.Host, ",")
 	if len(hosts) > 1 {
-		template := "instance:%d"
-		addrs := make(map[string]string)
-		for i, addr := range hosts {
-			addrs[fmt.Sprintf(template, i)] = addr
-		}
-		return New(redis.NewRing(&redis.RingOptions{
-			Addrs:        addrs,
-			DB:           gocast.ToInt(strings.Trim(connectURLObj.Path, `/`)),
-			Password:     password,
-			MaxRetries:   gocast.ToInt(connectURLObj.Query().Get(`max_retries`)),
-			PoolSize:     gocast.ToInt(connectURLObj.Query().Get(`pool`)),
-			MinIdleConns: gocast.ToInt(connectURLObj.Query().Get(`idle_cons`)),
-		}), defaultLifetime), nil
+
+		// the first node will be the master
+		//nodes := make([]redis.ClusterNode, 0)
+		//for _, addr := range hosts {
+		//	nodes = append(nodes, redis.ClusterNode{Addr: addr})
+		//}
+
+		rdb := redis.NewClusterClient(&redis.ClusterOptions{
+			//ClusterSlots: func() ([]redis.ClusterSlot, error) {
+			//	return []redis.ClusterSlot{{
+			//		Start: 0,
+			//		End:   maxSlotsCount,
+			//		Nodes: nodes,
+			//	}}, nil
+			//},
+
+			ClusterSlots: func() ([]redis.ClusterSlot, error) {
+				nodes := make([]redis.ClusterNode, 0)
+				latency := make([]int64, 0)
+				avalibleHosts := make([]string, 0)
+				for _, host := range hosts {
+					c := redis.NewClient(&redis.Options{Addr: host})
+					start := time.Now()
+					c.Ping()
+					late := time.Since(start)
+					if late.Seconds() > time.Second.Seconds() {
+						continue
+					}
+					latency = append(latency, late.Nanoseconds())
+					avalibleHosts = append(avalibleHosts, host)
+					c.Close()
+				}
+				sort.SliceIsSorted(avalibleHosts, func(i, j int) bool {
+					return latency[i] < latency[j]
+				})
+				for _, addr := range avalibleHosts {
+					nodes = append(nodes, redis.ClusterNode{Addr: addr})
+				}
+				return []redis.ClusterSlot{redis.ClusterSlot{
+					Start: 0,
+					End:   maxSlotsCount,
+					Nodes: nodes,
+				}}, nil
+			},
+		})
+		return New(rdb, defaultLifetime), nil
 	}
 	return New(redis.NewClient(&redis.Options{
 		DB:           gocast.ToInt(strings.Trim(connectURLObj.Path, `/`)),
@@ -77,6 +113,7 @@ func (mr *Lock) TryLock(key interface{}, lifetime ...time.Duration) error {
 	if err == nil && !res {
 		err = errLockHasFailed
 	}
+
 	return err
 }
 
