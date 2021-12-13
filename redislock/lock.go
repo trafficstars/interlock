@@ -3,9 +3,12 @@ package redislock
 
 import (
 	"errors"
+	"io"
+	"net"
 	"net/url"
-	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/demdxx/gocast"
@@ -22,13 +25,16 @@ const maxSlotsCount = 16384
 // Lock provides redis key locker
 type Lock struct {
 	lifetime time.Duration
-	client   redis.Cmdable
-	Cluster  *redis.ClusterClient
+
+	activeClient redis.Cmdable
+	clientPool   []redis.Cmdable
+
+	mtx sync.Mutex
 }
 
 // New returns redis Lock for redis client
 func New(client redis.Cmdable, defaultLifetime time.Duration) *Lock {
-	return &Lock{client: client, lifetime: defaultLifetime}
+	return &Lock{activeClient: client, lifetime: defaultLifetime}
 }
 
 // NewByURL returns redis Lock object or error
@@ -45,62 +51,26 @@ func NewByURL(connectURL string, defaultLifetime time.Duration) (*Lock, error) {
 		password, _ = connectURLObj.User.Password()
 	}
 	hosts := strings.Split(connectURLObj.Host, ",")
-	if len(hosts) > 1 {
 
-		// the first node will be the master
-		//nodes := make([]redis.ClusterNode, 0)
-		//for _, addr := range hosts {
-		//	nodes = append(nodes, redis.ClusterNode{Addr: addr})
-		//}
-
-		rdb := redis.NewClusterClient(&redis.ClusterOptions{
-			//ClusterSlots: func() ([]redis.ClusterSlot, error) {
-			//	return []redis.ClusterSlot{{
-			//		Start: 0,
-			//		End:   maxSlotsCount,
-			//		Nodes: nodes,
-			//	}}, nil
-			//},
-
-			ClusterSlots: func() ([]redis.ClusterSlot, error) {
-				nodes := make([]redis.ClusterNode, 0)
-				latency := make([]int64, 0)
-				avalibleHosts := make([]string, 0)
-				for _, host := range hosts {
-					c := redis.NewClient(&redis.Options{Addr: host})
-					start := time.Now()
-					c.Ping()
-					late := time.Since(start)
-					if late.Seconds() > time.Second.Seconds() {
-						continue
-					}
-					latency = append(latency, late.Nanoseconds())
-					avalibleHosts = append(avalibleHosts, host)
-					c.Close()
-				}
-				sort.SliceIsSorted(avalibleHosts, func(i, j int) bool {
-					return latency[i] < latency[j]
-				})
-				for _, addr := range avalibleHosts {
-					nodes = append(nodes, redis.ClusterNode{Addr: addr})
-				}
-				return []redis.ClusterSlot{redis.ClusterSlot{
-					Start: 0,
-					End:   maxSlotsCount,
-					Nodes: nodes,
-				}}, nil
-			},
-		})
-		return New(rdb, defaultLifetime), nil
+	// the first node will be the master
+	clientPool := make([]redis.Cmdable, 0)
+	for _, addr := range hosts {
+		clientPool = append(clientPool, redis.NewClient(&redis.Options{
+			DB:           gocast.ToInt(strings.Trim(connectURLObj.Path, `/`)),
+			Addr:         addr,
+			Password:     password,
+			PoolSize:     gocast.ToInt(connectURLObj.Query().Get(`pool`)),
+			MaxRetries:   gocast.ToInt(connectURLObj.Query().Get(`max_retries`)),
+			MinIdleConns: gocast.ToInt(connectURLObj.Query().Get(`idle_cons`)),
+		}))
 	}
-	return New(redis.NewClient(&redis.Options{
-		DB:           gocast.ToInt(strings.Trim(connectURLObj.Path, `/`)),
-		Addr:         connectURLObj.Host,
-		Password:     password,
-		PoolSize:     gocast.ToInt(connectURLObj.Query().Get(`pool`)),
-		MaxRetries:   gocast.ToInt(connectURLObj.Query().Get(`max_retries`)),
-		MinIdleConns: gocast.ToInt(connectURLObj.Query().Get(`idle_cons`)),
-	}), defaultLifetime), nil
+
+	return &Lock{
+		lifetime:     defaultLifetime,
+		activeClient: clientPool[0],
+		clientPool:   clientPool,
+		mtx:          sync.Mutex{},
+	}, nil
 }
 
 // TryLock message as processing
@@ -109,23 +79,41 @@ func (mr *Lock) TryLock(key interface{}, lifetime ...time.Duration) error {
 	if len(lifetime) == 1 {
 		lt = lifetime[0]
 	}
-	res, err := mr.client.SetNX(hash(key), []byte(`t`), lt).Result()
-	if err == nil && !res {
-		err = errLockHasFailed
-	}
 
-	return err
+	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+		mr.mtx.Lock()
+		res, err := mr.activeClient.SetNX(hash(key), []byte(`t`), lt).Result()
+		if isNetworkError(err) {
+			mr.refreshActiveClient()
+			mr.mtx.Unlock()
+			continue
+		}
+		mr.mtx.Unlock()
+		if err == nil && !res {
+			err = errLockHasFailed
+		}
+		return err
+	}
+	return nil
+}
+
+func (mr *Lock) refreshActiveClient() {
+	if len(mr.clientPool) > 1 {
+		mr.clientPool = mr.clientPool[1:]
+		mr.clientPool = append(mr.clientPool, mr.activeClient)
+		mr.activeClient = mr.clientPool[0]
+	}
 }
 
 // IsLocked in the redis server
 func (mr *Lock) IsLocked(key interface{}) bool {
-	val, _ := mr.client.Get(hash(key)).Result()
+	val, _ := mr.activeClient.Get(hash(key)).Result()
 	return val == `t`
 }
 
 // Unlock message as processing
 func (mr *Lock) Unlock(key interface{}) error {
-	return mr.client.Del(hash(key)).Err()
+	return mr.activeClient.Del(hash(key)).Err()
 }
 
 // Expire TTL of existing lock
@@ -134,9 +122,43 @@ func (mr *Lock) Expire(key interface{}, lifetime ...time.Duration) error {
 	if len(lifetime) == 1 {
 		lt = lifetime[0]
 	}
-	res, err := mr.client.Expire(hash(key), lt).Result()
+	res, err := mr.activeClient.Expire(hash(key), lt).Result()
 	if err == nil && !res {
 		err = errLockDoesNotExist
 	}
 	return err
+}
+
+func isNetworkError(err error) bool {
+	if err == io.EOF {
+		return true
+	}
+	cause := err
+	for {
+		// Unwrap was added in Go 1.13.
+		// See https://github.com/golang/go/issues/36781
+		if unwrap, ok := cause.(interface{ Unwrap() error }); ok {
+			cause = unwrap.Unwrap()
+			continue
+		}
+		break
+	}
+
+	// DNSError.IsNotFound was added in Go 1.13.
+	// See https://github.com/golang/go/issues/28635
+	if cause, ok := cause.(*net.DNSError); ok && cause.Err == "no such host" {
+		return true
+	}
+
+	if cause, ok := cause.(syscall.Errno); ok {
+		if cause == 10061 || cause == syscall.ECONNREFUSED {
+			return true
+		}
+	}
+
+	if _, ok := cause.(net.Error); ok {
+		return true
+	}
+
+	return false
 }
