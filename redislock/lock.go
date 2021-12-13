@@ -80,7 +80,7 @@ func (mr *Lock) TryLock(key interface{}, lifetime ...time.Duration) error {
 		lt = lifetime[0]
 	}
 
-	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
 		mr.mtx.Lock()
 		res, err := mr.activeClient.SetNX(hash(key), []byte(`t`), lt).Result()
 		if isNetworkError(err) {
@@ -107,7 +107,7 @@ func (mr *Lock) refreshActiveClient() {
 
 // IsLocked in the redis server
 func (mr *Lock) IsLocked(key interface{}) bool {
-	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
 		mr.mtx.Lock()
 		val, err := mr.activeClient.Get(hash(key)).Result()
 		if isNetworkError(err) {
@@ -123,7 +123,7 @@ func (mr *Lock) IsLocked(key interface{}) bool {
 
 // Unlock message as processing
 func (mr *Lock) Unlock(key interface{}) error {
-	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
 		mr.mtx.Lock()
 		err := mr.activeClient.Del(hash(key)).Err()
 		if isNetworkError(err) {
@@ -143,7 +143,7 @@ func (mr *Lock) Expire(key interface{}, lifetime ...time.Duration) error {
 	if len(lifetime) == 1 {
 		lt = lifetime[0]
 	}
-	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
 		mr.mtx.Lock()
 		res, err := mr.activeClient.Expire(hash(key), lt).Result()
 		if isNetworkError(err) {
