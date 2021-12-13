@@ -107,13 +107,34 @@ func (mr *Lock) refreshActiveClient() {
 
 // IsLocked in the redis server
 func (mr *Lock) IsLocked(key interface{}) bool {
-	val, _ := mr.activeClient.Get(hash(key)).Result()
-	return val == `t`
+	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+		mr.mtx.Lock()
+		val, err := mr.activeClient.Get(hash(key)).Result()
+		if isNetworkError(err) {
+			mr.refreshActiveClient()
+			mr.mtx.Unlock()
+			continue
+		}
+		mr.mtx.Unlock()
+		return val == `t`
+	}
+	return false
 }
 
 // Unlock message as processing
 func (mr *Lock) Unlock(key interface{}) error {
-	return mr.activeClient.Del(hash(key)).Err()
+	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+		mr.mtx.Lock()
+		err := mr.activeClient.Del(hash(key)).Err()
+		if isNetworkError(err) {
+			mr.refreshActiveClient()
+			mr.mtx.Unlock()
+			continue
+		}
+		mr.mtx.Unlock()
+		return err
+	}
+	return nil
 }
 
 // Expire TTL of existing lock
@@ -122,11 +143,21 @@ func (mr *Lock) Expire(key interface{}, lifetime ...time.Duration) error {
 	if len(lifetime) == 1 {
 		lt = lifetime[0]
 	}
-	res, err := mr.activeClient.Expire(hash(key), lt).Result()
-	if err == nil && !res {
-		err = errLockDoesNotExist
+	for attempts := 0; attempts < len(mr.clientPool)*2; attempts++ {
+		mr.mtx.Lock()
+		res, err := mr.activeClient.Expire(hash(key), lt).Result()
+		if isNetworkError(err) {
+			mr.refreshActiveClient()
+			mr.mtx.Unlock()
+			continue
+		}
+		mr.mtx.Unlock()
+		if err == nil && !res {
+			err = errLockDoesNotExist
+		}
+		return err
 	}
-	return err
+	return nil
 }
 
 func isNetworkError(err error) bool {
@@ -135,8 +166,6 @@ func isNetworkError(err error) bool {
 	}
 	cause := err
 	for {
-		// Unwrap was added in Go 1.13.
-		// See https://github.com/golang/go/issues/36781
 		if unwrap, ok := cause.(interface{ Unwrap() error }); ok {
 			cause = unwrap.Unwrap()
 			continue
@@ -144,8 +173,6 @@ func isNetworkError(err error) bool {
 		break
 	}
 
-	// DNSError.IsNotFound was added in Go 1.13.
-	// See https://github.com/golang/go/issues/28635
 	if cause, ok := cause.(*net.DNSError); ok && cause.Err == "no such host" {
 		return true
 	}
