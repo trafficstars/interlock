@@ -75,26 +75,29 @@ func NewByURL(connectURL string, defaultLifetime time.Duration) (*Lock, error) {
 
 // TryLock message as processing
 func (mr *Lock) TryLock(key interface{}, lifetime ...time.Duration) error {
+	var (
+		err error
+		res bool
+	)
 	lt := mr.lifetime
 	if len(lifetime) == 1 {
 		lt = lifetime[0]
 	}
-
+	mr.mtx.Lock()
 	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
-		mr.mtx.Lock()
-		res, err := mr.activeClient.SetNX(hash(key), []byte(`t`), lt).Result()
+		res, err = mr.activeClient.SetNX(hash(key), []byte(`t`), lt).Result()
 		if isNetworkError(err) {
 			mr.refreshActiveClient()
-			mr.mtx.Unlock()
 			continue
 		}
-		mr.mtx.Unlock()
 		if err == nil && !res {
 			err = errLockHasFailed
 		}
+		mr.mtx.Unlock()
 		return err
 	}
-	return nil
+	mr.mtx.Unlock()
+	return err
 }
 
 func (mr *Lock) refreshActiveClient() {
@@ -107,57 +110,66 @@ func (mr *Lock) refreshActiveClient() {
 
 // IsLocked in the redis server
 func (mr *Lock) IsLocked(key interface{}) bool {
+	var (
+		err error
+		val string
+	)
+	mr.mtx.Lock()
 	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
-		mr.mtx.Lock()
-		val, err := mr.activeClient.Get(hash(key)).Result()
+		val, err = mr.activeClient.Get(hash(key)).Result()
 		if isNetworkError(err) {
 			mr.refreshActiveClient()
-			mr.mtx.Unlock()
 			continue
 		}
 		mr.mtx.Unlock()
 		return val == `t`
 	}
+	mr.mtx.Unlock()
 	return false
 }
 
 // Unlock message as processing
 func (mr *Lock) Unlock(key interface{}) error {
+	var err error
+	mr.mtx.Lock()
 	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
-		mr.mtx.Lock()
-		err := mr.activeClient.Del(hash(key)).Err()
+		err = mr.activeClient.Del(hash(key)).Err()
 		if isNetworkError(err) {
 			mr.refreshActiveClient()
-			mr.mtx.Unlock()
 			continue
 		}
 		mr.mtx.Unlock()
 		return err
 	}
-	return nil
+	mr.mtx.Unlock()
+	return err
 }
 
 // Expire TTL of existing lock
 func (mr *Lock) Expire(key interface{}, lifetime ...time.Duration) error {
+	var (
+		err error
+		res bool
+	)
 	lt := mr.lifetime
 	if len(lifetime) == 1 {
 		lt = lifetime[0]
 	}
+	mr.mtx.Lock()
 	for attempts := 0; attempts < len(mr.clientPool); attempts++ {
-		mr.mtx.Lock()
-		res, err := mr.activeClient.Expire(hash(key), lt).Result()
+		res, err = mr.activeClient.Expire(hash(key), lt).Result()
 		if isNetworkError(err) {
 			mr.refreshActiveClient()
-			mr.mtx.Unlock()
 			continue
 		}
-		mr.mtx.Unlock()
 		if err == nil && !res {
 			err = errLockDoesNotExist
 		}
+		mr.mtx.Unlock()
 		return err
 	}
-	return nil
+	mr.mtx.Unlock()
+	return err
 }
 
 func isNetworkError(err error) bool {
